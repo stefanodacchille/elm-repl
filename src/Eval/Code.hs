@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Eval.Code (eval) where
 
+import Control.Monad (when, unless)
 import Control.Monad.Cont (ContT(ContT, runContT))
 import Control.Monad.Error (ErrorT, runErrorT, throwError)
 import Control.Monad.RWS (get, modify)
@@ -26,28 +27,40 @@ import qualified Elm.Package.Version as Version
 import qualified Elm.Utils as Utils
 
 
+cmdFailed res =
+    case res of
+         Left err -> True
+         Right ok -> False
+
+unwrapRes res =
+    case res of
+         Left err -> err
+         Right ok -> ok
+
 eval :: (Maybe Input.DefName, String) -> Eval.Command ()
 eval code =
- do modify $ Env.insert code 
+ do modify $ Env.insert code
     env <- get
+    liftIO $ print (Env.imports env)
     liftIO $ writeFile tempElmPath (Env.toElmCode env)
     liftIO . runConts $ do
-        runCmd (Env.compilerPath env) (Env.flags env ++ elmArgs)
+        compileRes <- runCmd (Env.compilerPath env) (Env.flags env ++ elmArgs)
+        when (cmdFailed compileRes) (resetEnv (unwrap compileRes) env code)
         liftIO $ addNodeRunner tempJsPath
         value <- runCmd (Env.interpreterPath env) [tempJsPath]
-        liftIO $ printIfNeeded value
+        unless (cmdFailed value) (liftIO $ printIfNeeded (unwrapRes value))
         liftIO $ removeIfExists tempElmPath
         liftIO $ removeIfExists tempJsPath
     return ()
   where
     runConts m = runContT m (\_ -> return ())
-    
+
     tempElmPath =
         "repl-temp-000" <.> "elm"
 
     tempJsPath =
         replaceExtension tempElmPath "js"
-    
+
     elmArgs =
         [ tempElmPath
         , "--yes"
@@ -61,7 +74,7 @@ printIfNeeded rawValue =
     _ ->
       do  tipe <- getType
           let value = init rawValue
-
+          liftIO $ putStrLn ("rawValue: " ++ rawValue)
           let isTooLong =
                 List.isInfixOf "\n" value
                   || List.isInfixOf "\n" tipe
@@ -74,19 +87,25 @@ printIfNeeded rawValue =
 
           putStrLn (value ++ tipeAnnotation)
 
+--resetEnv :: String -> Env.Env -> (Maybe Input.DefName, String) -> ContT () IO ()
+resetEnv res env code = ContT $ \ret ->
+         do  modify $ Env.delete code
+             ret ()
 
-runCmd :: FilePath -> [String] -> ContT () IO String
+runCmd :: FilePath -> [String] -> ContT () IO (Either String String)
 runCmd name args = ContT $ \ret ->
-  do  result <- liftIO (Utils.unwrappedRun name args)
+  do  liftIO (putStrLn $ "Run command: " ++ name)
+      result <- liftIO (Utils.unwrappedRun name args)
       case result of
         Right stdout ->
-            ret stdout
+            ret (Right stdout)
 
         Left (Utils.MissingExe msg) ->
             liftIO $ hPutStrLn stderr msg
 
         Left (Utils.CommandFailed out err) ->
-            liftIO $ hPutStrLn stderr (out ++ err)
+            do liftIO $ hPutStrLn stderr err
+               ret (Left err)
 
 
 addNodeRunner :: String -> IO ()

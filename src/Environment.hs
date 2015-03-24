@@ -71,6 +71,12 @@ insert (maybeName, src) env =
       Just (Input.VarDef name) ->
           define (BS.pack name) src (display name env)
 
+delete :: (Maybe Input.DefName, String) -> Env -> Env
+delete (maybeName, src) env =
+    case maybeName of
+      Just (Input.Import name) ->
+          noDisplay $ env
+              { imports = Trie.delete (BS.pack name) (imports env) }
 
 define :: ByteString -> String -> Env -> Env
 define name body env =
